@@ -40,6 +40,8 @@
 #error The driver requires at least kernel version 3.4
 #else
 
+#define USE_LIBGPIOD
+
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -51,6 +53,7 @@
 #include <linux/gpio.h>
 #include <linux/irq.h>
 #include <linux/kthread.h>
+#include <linux/gpio/generic.h>
 
 /**
   * ATTENTION:
@@ -113,6 +116,8 @@
  *  - Pin 21 (D6/DIN2 ) as input        (CH341_PIN_MODE_IN)
  *  - Pin 22 (D7/DIN  ) as input        (CH341_PIN_MODE_IN)
  */
+
+struct gpio_chip;
 
 struct ch341_pin_config {
     uint8_t pin;    // pin number of CH341 chip
@@ -541,8 +546,7 @@ static void ch341_i2c_remove (struct ch341_device* ch341_dev)
 
 // ----- irq layer begin -------------------------------------------------
 
-void ch341_irq_enable_disable (struct irq_data *data, bool enable)
-{
+static void ch341_irq_enable_disable (struct irq_data *data, bool enable) {
     struct ch341_device *ch341_dev;
     int irq;
 
@@ -561,18 +565,13 @@ void ch341_irq_enable_disable (struct irq_data *data, bool enable)
               data->irq, ch341_dev->irq_enabled[irq] ? 1 : 0);
 }
 
-void ch341_irq_enable (struct irq_data *data)
-{
-    ch341_irq_enable_disable (data, true);
-}
+static void ch341_irq_enable (struct irq_data *data) {
+    ch341_irq_enable_disable (data, true); }
 
-void ch341_irq_disable (struct irq_data *data)
-{
-    ch341_irq_enable_disable (data, false);
-}
+static void ch341_irq_disable (struct irq_data *data) {
+    ch341_irq_enable_disable (data, false); }
 
-int ch341_irq_set_type (struct irq_data *data, unsigned int type)
-{
+static int ch341_irq_set_type (struct irq_data *data, unsigned int type) {
     struct ch341_device *ch341_dev;
     int irq;
 
@@ -684,7 +683,7 @@ static void ch341_irq_remove (struct ch341_device* ch341_dev)
 
 // ----- gpio layer begin ------------------------------------------------
 
-void ch341_gpio_read_inputs (struct ch341_device* ch341_dev)
+static void ch341_gpio_read_inputs (struct ch341_device* ch341_dev)
 {
     uint8_t old_io_data;
     uint8_t old_value;
@@ -795,7 +794,7 @@ static int ch341_gpio_poll_function (void* argument)
     return 0;
 }
 
-int ch341_gpio_get (struct gpio_chip *chip, unsigned offset)
+static int ch341_gpio_get (struct gpio_chip *chip, unsigned offset)
 {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
@@ -816,7 +815,7 @@ int ch341_gpio_get (struct gpio_chip *chip, unsigned offset)
 }
 
 // FIXME: not tested at the moment (will be introduced with kernel 4.15.0)
-int ch341_gpio_get_multiple (struct gpio_chip *chip,
+static int ch341_gpio_get_multiple (struct gpio_chip *chip,
                              unsigned long *mask, unsigned long *bits)
 {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
@@ -843,7 +842,7 @@ int ch341_gpio_get_multiple (struct gpio_chip *chip,
     return CH341_OK;
 }
 
-void ch341_gpio_set (struct gpio_chip *chip, unsigned offset, int value)
+static int ch341_gpio_set (struct gpio_chip *chip, unsigned offset, int value)
 {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
@@ -851,8 +850,8 @@ void ch341_gpio_set (struct gpio_chip *chip, unsigned offset, int value)
     struct ch341_device* ch341_dev = container_of(chip, struct ch341_device, gpio);
     #endif
 
-    CHECK_PARAM (ch341_dev);
-    CHECK_PARAM (offset < ch341_dev->gpio_num);
+    CHECK_PARAM_RET (ch341_dev, -EINVAL);
+    CHECK_PARAM_RET(offset < ch341_dev->gpio_num, -EINVAL);
 
     if (value)
         ch341_dev->gpio_io_data |= ch341_dev->gpio_bits[offset];
@@ -862,10 +861,10 @@ void ch341_gpio_set (struct gpio_chip *chip, unsigned offset, int value)
     // DEV_DBG (CH341_IF_ADDR, "offset=%u value=%d io_data=%02x",
     //          offset, value, ch341_dev->gpio_io_data);
 
-    ch341_i2c_write_outputs (ch341_dev);
+    return ch341_i2c_write_outputs (ch341_dev);
 }
 
-void ch341_gpio_set_multiple (struct gpio_chip *chip,
+static int ch341_gpio_set_multiple (struct gpio_chip *chip,
                               unsigned long *mask, unsigned long *bits)
 {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
@@ -875,9 +874,7 @@ void ch341_gpio_set_multiple (struct gpio_chip *chip,
     #endif
     int i;
 
-    CHECK_PARAM (ch341_dev);
-    CHECK_PARAM (mask);
-    CHECK_PARAM (bits);
+    if(!ch341_dev || !mask || !bits) return -EINVAL;
 
     for (i = 0; i < ch341_dev->gpio_num; i++)
         if (*mask & (1 << i) && ch341_dev->gpio_pins[i]->mode == CH341_PIN_MODE_OUT)
@@ -891,13 +888,11 @@ void ch341_gpio_set_multiple (struct gpio_chip *chip,
     // DEV_DBG (CH341_IF_ADDR, "mask=%08lx bit=%08lx io_data=%02x",
     //          *mask, *bits, ch341_dev->gpio_io_data);
 
-    ch341_i2c_write_outputs (ch341_dev);
-
-    return;
+    return ch341_i2c_write_outputs (ch341_dev);
 }
 
 
-int ch341_gpio_get_direction (struct gpio_chip *chip, unsigned offset)
+static int ch341_gpio_get_direction (struct gpio_chip *chip, unsigned offset)
 {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
@@ -916,8 +911,7 @@ int ch341_gpio_get_direction (struct gpio_chip *chip, unsigned offset)
     return mode;
 }
 
-int ch341_gpio_set_direction (struct gpio_chip *chip, unsigned offset, bool input)
-{
+static int ch341_gpio_set_direction (struct gpio_chip *chip, unsigned offset, bool input) {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
     #else
@@ -947,14 +941,11 @@ int ch341_gpio_set_direction (struct gpio_chip *chip, unsigned offset, bool inpu
     return CH341_OK;
 }
 
-int ch341_gpio_direction_input (struct gpio_chip *chip, unsigned offset)
-{
-    return ch341_gpio_set_direction (chip, offset, true);
-}
+static int ch341_gpio_direction_input (struct gpio_chip *chip, unsigned offset) {
+    return ch341_gpio_set_direction (chip, offset, true); }
 
-int ch341_gpio_direction_output (struct gpio_chip *chip, unsigned offset, int value)
-{
-    int result = CH341_OK;
+static int ch341_gpio_direction_output (struct gpio_chip *chip, unsigned offset, int value) {
+    int result = CH341_OK; 
 
     if ((result = ch341_gpio_set_direction (chip, offset, false)) == CH341_OK)
         // set initial output value
@@ -963,8 +954,7 @@ int ch341_gpio_direction_output (struct gpio_chip *chip, unsigned offset, int va
     return result;
 }
 
-int ch341_gpio_to_irq (struct gpio_chip *chip, unsigned offset)
-{
+static int ch341_gpio_to_irq (struct gpio_chip *chip, unsigned offset) {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
     #else
@@ -989,7 +979,6 @@ static int ch341_gpio_probe (struct ch341_device* ch341_dev)
 {
     struct gpio_chip *gpio = &ch341_dev->gpio;
     int result;
-    int i, j = 0;
 
     CHECK_PARAM_RET (ch341_dev, -EINVAL);
 
@@ -1044,6 +1033,9 @@ static int ch341_gpio_probe (struct ch341_device* ch341_dev)
     DEV_DBG (CH341_IF_ADDR, "registered GPIOs from %d to %d",
              gpio->base, gpio->base + gpio->ngpio - 1);
 
+#ifndef USE_LIBGPIOD
+    {
+    int i, j = 0;
     for (i = 0; i < CH341_GPIO_NUM_PINS; i++)
     {
         // in case the pin as CS signal, it is an GPIO pin
@@ -1058,7 +1050,8 @@ static int ch341_gpio_probe (struct ch341_device* ch341_dev)
         }
         j++;
     }
-
+    }
+#endif
     ch341_dev->gpio_thread = kthread_run (&ch341_gpio_poll_function, ch341_dev, "i2c-ch341-usb-poll");
 
     DEV_DBG (CH341_IF_ADDR, "done");
@@ -1068,7 +1061,6 @@ static int ch341_gpio_probe (struct ch341_device* ch341_dev)
 
 static void ch341_gpio_remove (struct ch341_device* ch341_dev)
 {
-    int i;
     #if LINUX_VERSION_CODE < KERNEL_VERSION(3,17,0)
     int result;
     #endif
@@ -1081,11 +1073,15 @@ static void ch341_gpio_remove (struct ch341_device* ch341_dev)
         wake_up_process (ch341_dev->gpio_thread);
     }
 
-    if (ch341_dev->gpio.base > 0)
+    if (ch341_dev->gpio.base >= 0)
     {
-        for (i = 0; i < ch341_dev->gpio_num; ++i)
-           gpio_free(ch341_dev->gpio.base + i);
-
+#ifndef USE_LIBGPIOD
+        {
+            int i;
+            for (i = 0; i < ch341_dev->gpio_num; ++i)
+               gpio_free(ch341_dev->gpio.base + i);
+        }
+#endif
         #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
         gpiochip_remove(&ch341_dev->gpio);
         #else
