@@ -101,6 +101,13 @@
 
 #define CH341_OK                    0
 
+#define REG_I2C 1
+#define REG_SPI 2
+#define REG_GPIO 4
+#define REG_UART 8
+#define REG_USB 16
+
+
 /**
  *
  *  Change the default values in *ch341_board_config* for your configuraton
@@ -140,8 +147,7 @@ struct ch341_pin_config ch341_board_config[CH341_GPIO_NUM_PINS] =
 };
 
 // device specific structure
-struct ch341_device
-{
+struct ch341_device {
     // USB device description
     struct usb_device*    usb_dev;  // usb device
     struct usb_interface* usb_if;   // usb interface
@@ -164,6 +170,7 @@ struct ch341_device
     uint8_t                  gpio_num;                          // number of pins used as GPIOs
     uint8_t                  gpio_mask;                         // configuratoin mask defines IN/OUT pins
     uint8_t                  gpio_io_data;                      // current value of CH341 I/O register
+    uint8_t                  flag_registered;
     struct task_struct *     gpio_thread;                       // GPIO poll thread
     struct ch341_pin_config* gpio_pins   [CH341_GPIO_NUM_PINS]; // pin configurations (gpio_num elements)
     uint8_t                  gpio_bits   [CH341_GPIO_NUM_PINS]; // bit of I/O data byte (gpio_num elements)
@@ -195,8 +202,7 @@ static int ch341_usb_transfer (struct ch341_device *dev, int out_len, int in_len
 
 // ----- board configuration layer begin ---------------------------------
 
-static int ch341_cfg_probe (struct ch341_device* ch341_dev)
-{
+static int ch341_cfg_probe (struct ch341_device* ch341_dev) {
     struct ch341_pin_config* cfg;
     int i;
 
@@ -276,12 +282,7 @@ static int ch341_cfg_probe (struct ch341_device* ch341_dev)
     return CH341_OK;
 }
 
-static void ch341_cfg_remove (struct ch341_device* ch341_dev)
-{
-    CHECK_PARAM (ch341_dev);
-
-    return;
-}
+static void ch341_cfg_remove (struct ch341_device* ch341_dev) { CHECK_PARAM (ch341_dev); return; }
 
 // ----- board configuration layer end -----------------------------------
 
@@ -289,8 +290,7 @@ static void ch341_cfg_remove (struct ch341_device* ch341_dev)
 
 static struct mutex ch341_lock;
 
-static int ch341_i2c_set_speed (struct ch341_device *ch341_dev)
-{
+static int ch341_i2c_set_speed (struct ch341_device *ch341_dev) {
     static char* ch341_i2c_speed_desc[] = { "20 kbps", "100 kbps", "400 kbps", "750 kbps" };
     int result;
 
@@ -325,8 +325,7 @@ static int ch341_i2c_set_speed (struct ch341_device *ch341_dev)
     return result;
 }
 
-static int ch341_i2c_read_inputs (struct ch341_device* ch341_dev)
-{
+static int ch341_i2c_read_inputs (struct ch341_device* ch341_dev) {
     int result;
 
     if ((result = ch341_i2c_set_speed (ch341_dev)) < 0)
@@ -372,8 +371,7 @@ static int ch341_i2c_write_outputs (struct ch341_device* ch341_dev)
     return (result < 0) ? result : CH341_OK;
 }
 
-static int ch341_i2c_transfer (struct i2c_adapter *adpt, struct i2c_msg *msgs, int num)
-{
+static int ch341_i2c_transfer (struct i2c_adapter *adpt, struct i2c_msg *msgs, int num) {
     struct ch341_device* ch341_dev;
     int result;
     int i, j, k;
@@ -483,21 +481,16 @@ static int ch341_i2c_transfer (struct i2c_adapter *adpt, struct i2c_msg *msgs, i
     return num;
 }
 
-static u32 ch341_i2c_func (struct i2c_adapter *dev)
-{
-    return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
-}
+static u32 ch341_i2c_func (struct i2c_adapter *dev) { return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL; }
 
 
-static const struct i2c_algorithm ch341_i2c_algorithm =
-{
+static const struct i2c_algorithm ch341_i2c_algorithm = {
     .master_xfer   = ch341_i2c_transfer,
     .functionality = ch341_i2c_func,
 };
 
-static int ch341_i2c_probe (struct ch341_device* ch341_dev)
-{
-    int result;
+static int ch341_i2c_probe (struct ch341_device* ch341_dev) {
+    int result = -EINVAL;
 
     CHECK_PARAM_RET (ch341_dev, -EINVAL);
 
@@ -514,30 +507,33 @@ static int ch341_i2c_probe (struct ch341_device* ch341_dev)
 
     ch341_dev->i2c_dev.dev.parent = &ch341_dev->usb_if->dev;
 
+    mutex_init (&ch341_lock);
+
     // finally attach to i2c layer
     if ((result = i2c_add_adapter(&ch341_dev->i2c_dev)) < 0)
         return result;
 
     DEV_INFO (CH341_IF_ADDR, "created i2c device /dev/i2c-%d", ch341_dev->i2c_dev.nr);
 
-    mutex_init (&ch341_lock);
-
     // set ch341 i2c speed
     speed_last = CH341_I2C_FAST_SPEED+1;
     if ((result = ch341_i2c_set_speed (ch341_dev)) < 0)
         return result;
-
+    
+    ch341_dev->flag_registered |= REG_I2C;
     DEV_DBG (CH341_IF_ADDR, "done");
 
     return CH341_OK;
 }
 
-static void ch341_i2c_remove (struct ch341_device* ch341_dev)
-{
+static void ch341_i2c_remove (struct ch341_device* ch341_dev) {
     CHECK_PARAM (ch341_dev);
 
-    if (ch341_dev->i2c_dev.nr)
+    //if (ch341_dev->i2c_dev.nr)
+    if (ch341_dev->flag_registered & REG_I2C) {
         i2c_del_adapter (&ch341_dev->i2c_dev);
+        ch341_dev->flag_registered &= ~REG_I2C;
+    }
 
     return;
 }
@@ -565,11 +561,9 @@ static void ch341_irq_enable_disable (struct irq_data *data, bool enable) {
               data->irq, ch341_dev->irq_enabled[irq] ? 1 : 0);
 }
 
-static void ch341_irq_enable (struct irq_data *data) {
-    ch341_irq_enable_disable (data, true); }
+static void ch341_irq_enable (struct irq_data *data) { ch341_irq_enable_disable (data, true); }
 
-static void ch341_irq_disable (struct irq_data *data) {
-    ch341_irq_enable_disable (data, false); }
+static void ch341_irq_disable (struct irq_data *data) { ch341_irq_enable_disable (data, false); }
 
 static int ch341_irq_set_type (struct irq_data *data, unsigned int type) {
     struct ch341_device *ch341_dev;
@@ -591,8 +585,7 @@ static int ch341_irq_set_type (struct irq_data *data, unsigned int type) {
 }
 
 static int ch341_irq_check (struct ch341_device* ch341_dev, uint8_t irq,
-                            uint8_t old, uint8_t new, bool hardware)
-{
+                            uint8_t old, uint8_t new, bool hardware) {
     int type;
 
     CHECK_PARAM_RET (old != new, CH341_OK)
@@ -628,8 +621,7 @@ static int ch341_irq_check (struct ch341_device* ch341_dev, uint8_t irq,
     return CH341_OK;
 }
 
-static int ch341_irq_probe (struct ch341_device* ch341_dev)
-{
+static int ch341_irq_probe (struct ch341_device* ch341_dev) {
     int i;
     int result;
 
@@ -644,18 +636,16 @@ static int ch341_irq_probe (struct ch341_device* ch341_dev)
 
     if (!ch341_dev->irq_num) return CH341_OK;
 
-    if ((result = irq_alloc_descs(-1, 0, ch341_dev->irq_num, 0)) < 0)
-    {
+    if ((result = irq_alloc_descs(-1, 0, ch341_dev->irq_num, 0)) < 0) {
         DEV_ERR (CH341_IF_ADDR, "failed to allocate IRQ descriptors");
-        return result;
+        return result; 
     }
 
     ch341_dev->irq_base = result;
 
     DEV_DBG (CH341_IF_ADDR, "irq_base=%d", ch341_dev->irq_base);
 
-    for (i = 0; i < ch341_dev->irq_num; i++)
-    {
+    for (i = 0; i < ch341_dev->irq_num; i++) {
         ch341_dev->irq_descs[i] = irq_data_to_desc( irq_get_irq_data(ch341_dev->irq_base + i) );
         ch341_dev->irq_enabled[i] = false;
 
@@ -669,8 +659,7 @@ static int ch341_irq_probe (struct ch341_device* ch341_dev)
     return CH341_OK;
 }
 
-static void ch341_irq_remove (struct ch341_device* ch341_dev)
-{
+static void ch341_irq_remove (struct ch341_device* ch341_dev) {
     CHECK_PARAM (ch341_dev);
 
     if (ch341_dev->irq_base)
@@ -683,8 +672,7 @@ static void ch341_irq_remove (struct ch341_device* ch341_dev)
 
 // ----- gpio layer begin ------------------------------------------------
 
-static void ch341_gpio_read_inputs (struct ch341_device* ch341_dev)
-{
+static void ch341_gpio_read_inputs (struct ch341_device* ch341_dev) {
     uint8_t old_io_data;
     uint8_t old_value;
     uint8_t new_value;
@@ -701,8 +689,7 @@ static void ch341_gpio_read_inputs (struct ch341_device* ch341_dev)
     // read current values
     ch341_i2c_read_inputs (ch341_dev);
 
-    for (i = 0; i < ch341_dev->irq_num; i++)
-    {
+    for (i = 0; i < ch341_dev->irq_num; i++) {
         // determine local GPIO for each IRQ
         gpio = ch341_dev->irq_gpio_map[i];
 
@@ -719,8 +706,7 @@ static void ch341_gpio_read_inputs (struct ch341_device* ch341_dev)
 
 // #define CH341_POLL_WITH_SLEEP
 
-static int ch341_gpio_poll_function (void* argument)
-{
+static int ch341_gpio_poll_function (void* argument) {
     struct ch341_device* ch341_dev = (struct ch341_device*)argument;
     unsigned int next_poll_ms = jiffies_to_msecs(jiffies);
     unsigned int jiffies_ms;
@@ -732,28 +718,23 @@ static int ch341_gpio_poll_function (void* argument)
 
     DEV_DBG (CH341_IF_ADDR, "start");
 
-    while (!kthread_should_stop())
-    {
+    while (!kthread_should_stop()) {
         // current time in ms
         jiffies_ms = jiffies_to_msecs(jiffies);
         drift_ms   = jiffies_ms - next_poll_ms;
 
-        if (poll_period == 0)
-        {
+        if (poll_period == 0) {
             poll_period = CH341_POLL_PERIOD_MS;
             DEV_ERR (CH341_IF_ADDR,
                      "Poll period 0 ms is invalid, set back to the default of %d ms",
                      CH341_POLL_PERIOD_MS);
         }
 
-        if (drift_ms < 0)
-        {
+        if (drift_ms < 0) {
             // period was to short, increase corr_ms by 1 ms
             // DEV_DBG (CH341_IF_ADDR, "polling GPIO is %u ms too early", -drift_ms);
             corr_ms = (corr_ms > 0) ? corr_ms - 1 : 0;
-        }
-        else if (drift_ms > 0 && drift_ms < poll_period)
-        {
+        } else if (drift_ms > 0 && drift_ms < poll_period) {
             // period was to long, decrease corr_ms by 1 ms
             // DEV_DBG (CH341_IF_ADDR, "polling GPIO is %u ms too late", drift_ms);
             corr_ms = (corr_ms < poll_period) ? corr_ms + 1 : 0;
@@ -767,14 +748,11 @@ static int ch341_gpio_poll_function (void* argument)
         jiffies_ms = jiffies_to_msecs(jiffies);
 
         // if GPIO read took longer than poll period, do not sleep
-        if (jiffies_ms > next_poll_ms)
-        {
+        if (jiffies_ms > next_poll_ms) {
             DEV_ERR (CH341_IF_ADDR,
                      "GPIO poll period is too short by at least %u msecs",
                      jiffies_ms - next_poll_ms);
-        }
-        else
-        {
+        } else {
             sleep_ms = next_poll_ms - jiffies_ms - corr_ms;
 
             #ifdef CH341_POLL_WITH_SLEEP
@@ -794,8 +772,7 @@ static int ch341_gpio_poll_function (void* argument)
     return 0;
 }
 
-static int ch341_gpio_get (struct gpio_chip *chip, unsigned offset)
-{
+static int ch341_gpio_get (struct gpio_chip *chip, unsigned offset) {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
     #else
@@ -816,8 +793,7 @@ static int ch341_gpio_get (struct gpio_chip *chip, unsigned offset)
 
 // FIXME: not tested at the moment (will be introduced with kernel 4.15.0)
 static int ch341_gpio_get_multiple (struct gpio_chip *chip,
-                             unsigned long *mask, unsigned long *bits)
-{
+                             unsigned long *mask, unsigned long *bits) {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
     #else
@@ -842,8 +818,7 @@ static int ch341_gpio_get_multiple (struct gpio_chip *chip,
     return CH341_OK;
 }
 
-static int ch341_gpio_set (struct gpio_chip *chip, unsigned offset, int value)
-{
+static int ch341_gpio_set (struct gpio_chip *chip, unsigned offset, int value) {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
     #else
@@ -865,8 +840,7 @@ static int ch341_gpio_set (struct gpio_chip *chip, unsigned offset, int value)
 }
 
 static int ch341_gpio_set_multiple (struct gpio_chip *chip,
-                              unsigned long *mask, unsigned long *bits)
-{
+                              unsigned long *mask, unsigned long *bits) {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
     #else
@@ -874,7 +848,9 @@ static int ch341_gpio_set_multiple (struct gpio_chip *chip,
     #endif
     int i;
 
-    if(!ch341_dev || !mask || !bits) return -EINVAL;
+    CHECK_PARAM_RET(ch341_dev, -EINVAL);
+    CHECK_PARAM_RET(mask, -EINVAL);
+    CHECK_PARAM_RET(bits, -EINVAL);
 
     for (i = 0; i < ch341_dev->gpio_num; i++)
         if (*mask & (1 << i) && ch341_dev->gpio_pins[i]->mode == CH341_PIN_MODE_OUT)
@@ -892,8 +868,7 @@ static int ch341_gpio_set_multiple (struct gpio_chip *chip,
 }
 
 
-static int ch341_gpio_get_direction (struct gpio_chip *chip, unsigned offset)
-{
+static int ch341_gpio_get_direction (struct gpio_chip *chip, unsigned offset) {
     #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
     struct ch341_device* ch341_dev = (struct ch341_device*)gpiochip_get_data(chip);
     #else
@@ -975,8 +950,7 @@ static int ch341_gpio_to_irq (struct gpio_chip *chip, unsigned offset) {
 }
 
 
-static int ch341_gpio_probe (struct ch341_device* ch341_dev)
-{
+static int ch341_gpio_probe (struct ch341_device* ch341_dev) {
     struct gpio_chip *gpio = &ch341_dev->gpio;
     int result;
 
@@ -1029,15 +1003,15 @@ static int ch341_gpio_probe (struct ch341_device* ch341_dev)
         gpio->base   = -1;
         return result;
     }
-
+    ch341_dev->flag_registered |= REG_GPIO;
     DEV_DBG (CH341_IF_ADDR, "registered GPIOs from %d to %d",
              gpio->base, gpio->base + gpio->ngpio - 1);
 
 #ifndef USE_LIBGPIOD
     {
-    int i, j = 0;
-    for (i = 0; i < CH341_GPIO_NUM_PINS; i++)
-    {
+      int i, j = 0;
+      for (i = 0; i < CH341_GPIO_NUM_PINS; i++)
+      {
         // in case the pin as CS signal, it is an GPIO pin
         if ((result = gpio_request(gpio->base + j, ch341_board_config[i].name)) ||
             (result = gpio_export (gpio->base + j, ch341_board_config[i].pin != 21 ? true : false)))
@@ -1049,7 +1023,7 @@ static int ch341_gpio_probe (struct ch341_device* ch341_dev)
             return result;
         }
         j++;
-    }
+      }
     }
 #endif
     ch341_dev->gpio_thread = kthread_run (&ch341_gpio_poll_function, ch341_dev, "i2c-ch341-usb-poll");
@@ -1059,8 +1033,7 @@ static int ch341_gpio_probe (struct ch341_device* ch341_dev)
     return 0;
 }
 
-static void ch341_gpio_remove (struct ch341_device* ch341_dev)
-{
+static void ch341_gpio_remove (struct ch341_device* ch341_dev) {
     #if LINUX_VERSION_CODE < KERNEL_VERSION(3,17,0)
     int result;
     #endif
@@ -1073,8 +1046,8 @@ static void ch341_gpio_remove (struct ch341_device* ch341_dev)
         wake_up_process (ch341_dev->gpio_thread);
     }
 
-    if (ch341_dev->gpio.base >= 0)
-    {
+    //if (ch341_dev->gpio.base >= 0) {
+    if (ch341_dev->flag_registered & REG_GPIO) {
 #ifndef USE_LIBGPIOD
         {
             int i;
@@ -1087,6 +1060,7 @@ static void ch341_gpio_remove (struct ch341_device* ch341_dev)
         #else
         result = gpiochip_remove(&ch341_dev->gpio);
         #endif
+        ch341_dev->flag_registered &= ~REG_GPIO;
     }
 
     return;
@@ -1103,8 +1077,7 @@ static const struct usb_device_id ch341_usb_table[] = {
 
 MODULE_DEVICE_TABLE(usb, ch341_usb_table);
 
-static int ch341_usb_transfer(struct ch341_device *ch341_dev, int out_len, int in_len)
-{
+static int ch341_usb_transfer(struct ch341_device *ch341_dev, int out_len, int in_len) {
     int retval;
     int actual;
 
@@ -1135,8 +1108,7 @@ static int ch341_usb_transfer(struct ch341_device *ch341_dev, int out_len, int i
     return actual;
 }
 
-static void ch341_usb_complete_intr_urb (struct urb *urb)
-{
+static void ch341_usb_complete_intr_urb (struct urb *urb) {
     struct ch341_device *ch341_dev;
 
     CHECK_PARAM (urb);
@@ -1158,9 +1130,11 @@ static void ch341_usb_complete_intr_urb (struct urb *urb)
     }
 }
 
-static void ch341_usb_free_device (struct ch341_device* ch341_dev)
-{
+static void ch341_usb_free_device (struct ch341_device* ch341_dev) {
     CHECK_PARAM (ch341_dev)
+
+    /* Stop asynchronous USB callback first */
+    if (ch341_dev->intr_urb) { usb_kill_urb(ch341_dev->intr_urb); }
 
     ch341_gpio_remove (ch341_dev);
     ch341_irq_remove  (ch341_dev);
@@ -1176,8 +1150,7 @@ static void ch341_usb_free_device (struct ch341_device* ch341_dev)
 }
 
 static int ch341_usb_probe (struct usb_interface* usb_if,
-                            const struct usb_device_id* usb_id)
-{
+                            const struct usb_device_id* usb_id) {
     struct usb_device* usb_dev = usb_get_dev(interface_to_usbdev(usb_if));
     struct usb_endpoint_descriptor *epd;
     struct usb_host_interface *settings;
@@ -1195,6 +1168,7 @@ static int ch341_usb_probe (struct usb_interface* usb_if,
         return -ENOMEM;
     }
 
+    ch341_dev->flag_registered = 0;
     // save USB device data
     ch341_dev->usb_dev = usb_dev;
     ch341_dev->usb_if  = usb_if;
@@ -1203,8 +1177,7 @@ static int ch341_usb_probe (struct usb_interface* usb_if,
     settings = usb_if->cur_altsetting;
     DEV_DBG (CH341_IF_ADDR, "bNumEndpoints=%d", settings->desc.bNumEndpoints);
 
-    for (i = 0; i < settings->desc.bNumEndpoints; i++)
-    {
+    for (i = 0; i < settings->desc.bNumEndpoints; i++) {
         epd = &settings->endpoint[i].desc;
 
         DEV_DBG (CH341_IF_ADDR, "  endpoint=%d type=%d dir=%d addr=%0x", i,
@@ -1216,8 +1189,7 @@ static int ch341_usb_probe (struct usb_interface* usb_if,
         if (usb_endpoint_xfer_int   (epd)) ch341_dev->ep_intr = epd;
     }
     // create URBs for handling interrupts
-    if (!(ch341_dev->intr_urb = usb_alloc_urb(0, GFP_KERNEL)))
-    {
+    if (!(ch341_dev->intr_urb = usb_alloc_urb(0, GFP_KERNEL))) {
         DEV_ERR (&usb_if->dev, "failed to alloc URB");
         ch341_usb_free_device (ch341_dev);
         return -ENOMEM;
@@ -1243,19 +1215,21 @@ static int ch341_usb_probe (struct usb_interface* usb_if,
     }
 
     usb_submit_urb (ch341_dev->intr_urb, GFP_ATOMIC);
-
+    ch341_dev->flag_registered |= REG_USB;
     DEV_INFO (CH341_IF_ADDR, "connected");
 
     return CH341_OK;
 }
 
-static void ch341_usb_disconnect(struct usb_interface *usb_if)
-{
+static void ch341_usb_disconnect(struct usb_interface *usb_if) {
     struct ch341_device* ch341_dev = usb_get_intfdata(usb_if);
 
     DEV_INFO (CH341_IF_ADDR, "disconnected");
-
-    ch341_usb_free_device (ch341_dev);
+    CHECK_PARAM(ch341_dev);
+    if(ch341_dev->flag_registered & REG_USB) {
+        ch341_usb_free_device (ch341_dev);
+        ch341_dev->flag_registered &= REG_USB; //need check....
+    }
 }
 
 static struct usb_driver ch341_usb_driver = {
