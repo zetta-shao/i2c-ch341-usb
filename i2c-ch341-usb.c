@@ -806,9 +806,9 @@ static int ch341_gpio_get_multiple (struct gpio_chip *chip,
     CHECK_PARAM_RET (bits, -EINVAL);
 
     for (i = 0; i < ch341_dev->gpio_num; i++)
-        if (*mask & (1 << i))
+        if (*mask & (1UL << i))
         {
-            *bits &= ~(1 << i);
+            *bits &= ~(1UL << i);
             *bits |= (((ch341_dev->gpio_io_data & ch341_dev->gpio_bits[i]) ? 1 : 0) << i);
         }
 
@@ -853,9 +853,9 @@ static int ch341_gpio_set_multiple (struct gpio_chip *chip,
     CHECK_PARAM_RET(bits, -EINVAL);
 
     for (i = 0; i < ch341_dev->gpio_num; i++)
-        if (*mask & (1 << i) && ch341_dev->gpio_pins[i]->mode == CH341_PIN_MODE_OUT)
+        if (*mask & (1UL << i) && ch341_dev->gpio_pins[i]->mode == CH341_PIN_MODE_OUT)
         {
-            if (*bits & (1 << i))
+            if (*bits & (1UL << i))
                 ch341_dev->gpio_io_data |= ch341_dev->gpio_bits[i];
             else
                 ch341_dev->gpio_io_data &= ~ch341_dev->gpio_bits[i];
@@ -1228,7 +1228,7 @@ static void ch341_usb_disconnect(struct usb_interface *usb_if) {
     CHECK_PARAM(ch341_dev);
     if(ch341_dev->flag_registered & REG_USB) {
         ch341_usb_free_device (ch341_dev);
-        ch341_dev->flag_registered &= REG_USB; //need check....
+        ch341_dev->flag_registered &= ~REG_USB; //need check....
     }
 }
 
